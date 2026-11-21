@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import pandas as pd
 import plotly.graph_objects as go
@@ -10,7 +11,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Resolve Cloud Run API URL (works both locally and on Streamlit Community Cloud)
 DEFAULT_API_URL = "https://xgrapm-api-753801721214.us-central1.run.app"
 try:
     API_URL = st.secrets.get("API_URL", os.getenv("API_URL", DEFAULT_API_URL)).rstrip("/")
@@ -18,11 +18,28 @@ except Exception:
     API_URL = os.getenv("API_URL", DEFAULT_API_URL).rstrip("/")
 
 
+def request_with_retry(method: str, url: str, json_payload: dict | None = None, retries: int = 2) -> dict:
+    for attempt in range(retries + 1):
+        try:
+            if method == "GET":
+                resp = requests.get(url, timeout=(5, 30))
+            else:
+                resp = requests.post(url, json=json_payload, timeout=(5, 30))
+            if resp.status_code == 422:
+                detail = resp.json().get("detail", "Invalid lineup selection.")
+                raise ValueError(detail)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt == retries:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError("Unreachable")
+
+
 @st.cache_data(ttl=3600)
 def fetch_players(api_url: str) -> list[dict]:
-    resp = requests.get(f"{api_url}/players", timeout=30)
-    resp.raise_for_status()
-    return resp.json()["players"]
+    return request_with_retry("GET", f"{api_url}/players")["players"]
 
 
 def run_prediction(
@@ -40,9 +57,7 @@ def run_prediction(
         "home_red_cards": home_red_cards,
         "away_red_cards": away_red_cards,
     }
-    resp = requests.post(f"{api_url}/predict", json=payload, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    return request_with_retry("POST", f"{api_url}/predict", json_payload=payload)
 
 
 def match_defaults(players: list[dict], queries: list[str]) -> list[str]:
@@ -64,9 +79,12 @@ st.markdown(
 )
 
 try:
-    players = fetch_players(API_URL)
+    with st.spinner("Connecting to Cloud Run inference API..."):
+        players = fetch_players(API_URL)
 except Exception as exc:
     st.error(f"Could not connect to Cloud Run API at `{API_URL}`: {exc}")
+    if st.button("Retry Connection"):
+        st.rerun()
     st.stop()
 
 label_to_id = {f"{p['player_name']} (ID: {p['player_id']})": p["player_id"] for p in players}
@@ -92,6 +110,7 @@ with st.sidebar:
     is_home_venue = st.toggle("Home Venue Advantage", value=True)
     home_red_cards = st.number_input("Home Red Cards", min_value=0, max_value=4, value=0, step=1)
     away_red_cards = st.number_input("Away Red Cards", min_value=0, max_value=4, value=0, step=1)
+    st.caption(f"Active Pitch Manpower: **{11 - int(home_red_cards)}v{11 - int(away_red_cards)}**")
     st.divider()
     st.caption(f"Connected API:\n`{API_URL}`")
     st.caption(f"Player Catalog: **{len(players):,}** Big 5 players")
@@ -99,35 +118,48 @@ with st.sidebar:
 col_home, col_away = st.columns(2)
 with col_home:
     home_selected = st.multiselect(
-        "Home Lineup (up to 11 players)",
+        "Home Starting XI (11 players)",
         options=all_labels,
         default=default_home,
         max_selections=11,
     )
 with col_away:
+    away_options = [lbl for lbl in all_labels if lbl not in home_selected]
+    away_default_clean = [lbl for lbl in default_away if lbl not in home_selected]
     away_selected = st.multiselect(
-        "Away Lineup (up to 11 players)",
-        options=all_labels,
-        default=default_away,
+        "Away Starting XI (11 players)",
+        options=away_options,
+        default=away_default_clean,
         max_selections=11,
     )
 
-if not home_selected or not away_selected:
-    st.warning("Select at least one player for both Home and Away lineups.")
+if len(home_selected) != len(away_selected) or len(home_selected) == 0:
+    st.info(
+        f"Select equal lineup sizes for both teams (currently **{len(home_selected)}** Home vs. "
+        f"**{len(away_selected)}** Away) so the shared regression baseline cancels cleanly. "
+        f"Use the sidebar **Red Cards** controls to simulate 10v11 matches."
+    )
     st.stop()
 
 home_ids = [label_to_id[lbl] for lbl in home_selected]
 away_ids = [label_to_id[lbl] for lbl in away_selected]
 
-with st.spinner("Computing xGRAPM matchup differential..."):
-    result = run_prediction(
-        API_URL,
-        home_ids,
-        away_ids,
-        is_home_venue,
-        int(home_red_cards),
-        int(away_red_cards),
-    )
+try:
+    with st.spinner("Computing xGRAPM matchup differential..."):
+        result = run_prediction(
+            API_URL,
+            home_ids,
+            away_ids,
+            is_home_venue,
+            int(home_red_cards),
+            int(away_red_cards),
+        )
+except ValueError as err:
+    st.warning(str(err))
+    st.stop()
+except Exception as exc:
+    st.error(f"Prediction request failed: {exc}")
+    st.stop()
 
 comp = result["components"]
 net_diff = result["predicted_npxg_diff_90"]
@@ -144,7 +176,13 @@ m2.metric("Lineup Skill Diff (Home − Away)", f"{comp['net_lineup_diff_90']:+.3
 m3.metric("On-Ball Micro Diff", f"{comp['micro_diff_90']:+.3f}")
 m4.metric("Off-Ball Macro + Context", f"{comp['macro_diff_90'] + context_adj:+.3f}")
 
-# Player Decomposition Chart
+with st.expander("How to interpret these ratings (Methodology Note)", expanded=False):
+    st.markdown(
+        "- **On-Ball Micro Prior ($\\beta_{\\text{Micro}}$):** Estimated from individual ball-progression, shot-creation, and defensive event values.\n"
+        "- **Off-Ball Macro Residual ($\\delta_{\\text{Macro}}$):** Stint-level Ridge regression adjustment capturing off-ball spacing, pressing, and lineup synergy not visible in on-ball event logs.\n"
+        "- **Total xGRAPM ($\\beta_{\\text{Micro}} + \\delta_{\\text{Macro}}$):** Net expected non-penalty goal difference per 90 minutes (includes a shared regression baseline offset that cancels out across equal lineups)."
+    )
+
 home_df = pd.DataFrame(result["home_players"]).assign(Side="Home")
 away_df = pd.DataFrame(result["away_players"]).assign(Side="Away")
 combined_df = pd.concat([home_df, away_df], ignore_index=True)
@@ -173,7 +211,7 @@ fig.update_layout(
     barmode="relative",
     height=max(420, len(combined_df) * 28),
     yaxis={"categoryorder": "total ascending"},
-    xaxis_title="npxG / 90 Contribution",
+    xaxis_title="npxG / 90 Rating (includes shared intercept)",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 st.plotly_chart(fig, use_container_width=True)
