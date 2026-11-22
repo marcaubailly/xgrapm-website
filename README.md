@@ -1,17 +1,67 @@
 # xGRAPM — Expected Goal Regularized Adjusted Plus-Minus
 
-Interactive football analytics dashboard and two-stage player valuation pipeline calibrated on **1,826 matches from the 2015/16 Big 5 European Leagues**.
+An end-to-end football player valuation framework and interactive analytics dashboard calibrated on **1,826 matches from the 2015/16 Big 5 European Leagues** (Premier League, La Liga, Bundesliga, Serie A, and Ligue 1).
 
-## Methodology Overview
-- **Stage 1 (Micro — Markovian State Value):** Evaluates discrete player turns on a 120x80m pitch using Euclidean distance and visible shooting angle to the goalposts, compounding forward 10-action shot probabilities and separating **In-Possession Creation (Micro Off)** from **Out-of-Possession Ball-Winning (Micro Def)**.
-- **Stage 2 (Macro — Ridge Regression):** Solves for off-ball positioning and team tactical structure across lineup stints while controlling for home advantage, red-card manpower differentials, and score-state effects.
-- **Dashboard Modules (`index.html` + `main.py`):**
-  1. **Scouting & Plays:** Filterable player leaderboard with Position-Relative Role Percentiles, Per-Touch Efficiency (`npxG / 100 actions`), and animated progressive play sequences.
-  2. **Match Context Lab:** Head-to-head Starting XI lineup simulator with manpower and venue adjustments.
-  3. **2016 Ballon d'Or vs. xGRAPM:** Empirical comparison against the 30-man *France Football* ballot.
-  4. **Threat Heatmap:** 12x8 spatial-angular danger grid and Pitch Depth x Angle Corridor Matrix across 8 tactical game states.
+---
 
-## Run Locally
-- Install dependencies: `pip install -r requirements.txt`
-- Start server: `uvicorn main:app --reload`
-- Open `http://127.0.0.1:8000` in your browser.
+## 1. Problem Statement & Modeling Architecture
+
+Evaluating football players requires solving two classic statistical problems:
+1. **Event-Only Blindness:** Ball-event data logs passes, carries, dribbles, shots, and tackles, but misses off-ball runs, decoy movement, and defensive lane-screening.
+2. **Lineup Collinearity (RAPM Noise):** Pure lineup plus-minus models struggle to separate teammates who share the pitch constantly (e.g., Messi, Suárez, and Neymar) and penalize players for teammate finishing variance.
+
+**xGRAPM** solves both by combining a **bottom-up spatial state-value model (Stage 1: Micro)** with a **top-down regularized stint regression (Stage 2: Macro)**:
+
+$$\text{Total xGRAPM}_{i} = \beta_{\text{Micro, Off}, i} + \beta_{\text{Micro, Def}, i} + \delta_{\text{Macro, Off-Ball}, i}$$
+
+---
+
+## 2. Step-by-Step Methodology & Model Selection Rationale
+
+### Step A: Player-Turn Aggregation (Data Granularity)
+* **What it does:** Collapses fragmented raw event streams (`Ball Receipt -> Carry -> Dribble -> Pass`) into uninterrupted **player turns** (`1 row = 1 player possession spell or defensive intervention`).
+* **Why this design:** Prevents multi-touch sequences by a single ball-carrier from being double-counted and ensures a 10-turn lookahead window represents a consistent tactical phase (~15–25 seconds of play).
+
+### Step B: Spatial-Angular Geometry & Terminal Shot xG Model
+* **What it does:** Maps every turn on a $120 \times 80\text{m}$ pitch using Euclidean distance ($d$) and **visible shooting angle ($\theta$)** between the goalposts ($y \in [36.34, 43.66]$ at $x = 120$):
+  $$\theta = \arctan\left(\frac{7.32 \cdot \Delta x}{\Delta x^2 + \Delta y^2 - 3.66^2}\right)$$
+  Terminal shots are valued via a calibrated logistic **Expected Goals (xG)** model.
+* **Why xG + Geometry:** Actual goals are too sparse and noisy over a single season. Using non-penalty xG (`npxG`) as the terminal reward removes goalkeeper/finishing luck, while visible angle $\theta$ captures why central Zone 14 locations ($\theta \approx 25^\circ$) generate far higher scoring odds than wide positions ($\theta < 9^\circ$) at the same distance.
+
+### Step C: Stage 1 (Micro) — Markovian 10-Action State Value & Off/Def Split
+* **What it does:**
+  * **10-Action Ball Danger ($V_t$):** Looks forward across the next 10 player turns for the possessing team and compounds future shot probabilities:
+    $$V_t = 1 - \prod_{k=0}^{9} \left(1 - p_{\text{shot}, t+k}\right)$$
+  * **Marginal Action Value ($\Delta V$):** Credits or penalizes each touch for the net change in scoring probability minus counter-attack risk conceded upon turnover:
+    $$\Delta V = \left(V_{\text{end, for}} - V_{\text{start, for}}\right) - \left(V_{\text{end, against}} - V_{\text{start, against}}\right)$$
+  * **In-Possession vs. Out-of-Possession Decomposition:** Splits on-ball value into **`Micro Off`** (progression via passes, carries, dribbles, shots) and **`Micro Def`** (threat prevented via tackles, interceptions, and ball recoveries).
+* **Why Markovian State Value:** Rather than relying on heuristic action weights, forward 10-turn compounding empirically measures how dangerous holding the ball is at every $(x, y)$ coordinate and angle. Separating `Micro Off` from `Micro Def` prevents high-volume attackers from masking defensive liabilities and highlights elite ball-winners.
+
+### Step D: Stage 2 (Macro) — L2-Regularized (Ridge) Stint Regression
+* **What it does:** Splits every match into constant-lineup stints (at substitutions and red cards) and fits a **Ridge regression (L2 penalty)** predicting stint net `npxG/90` using Stage 1 Micro ratings as priors, while controlling for **home-field advantage**, **red-card manpower differentials**, and **score-state effects**.
+* **Why Ridge Regression:**
+  * Captures unlogged **off-ball structural impact** ($\delta_{\text{Macro}}$) that event logs cannot see.
+  * **L2 regularization** shrinks low-minute players toward zero and stabilizes estimates when teammates share high minutes together.
+  * **Score-state controls** prevent penalizing defenders on leading teams that intentionally drop into compact low blocks late in matches.
+
+### Step E: Role-Relative Percentiles & Usage Efficiency
+* **Position-Relative Role Percentiles (`ATT`, `MID`, `DEF`, `GK`):** Benchmarks qualified players ($\ge 900$ minutes) strictly against positional peers so center-backs and holding midfielders are evaluated on their own tactical scale.
+* **Per-Touch Efficiency (`npxG / 100 Actions`):** Divides net threat generated by involvement volume to separate high-usage playmakers from clinical, low-touch finishers.
+
+---
+
+## 3. Interactive Dashboard Modules (`main.py` + `index.html`)
+
+1. **Scouting & Plays:** Filterable Big 5 leaderboard with Micro Off/Def + Macro splits, Role Percentiles, Per-Touch Efficiency, and animated progressive play sequences.
+2. **Match Context Lab:** Head-to-head Starting XI lineup simulator adjusting for home venue advantage and red-card manpower states.
+3. **2016 Ballon d'Or vs. xGRAPM:** Empirical audit comparing *France Football* top-3 ballot rankings against full-season per-90 impact.
+4. **Threat Heatmap:** $12 \times 8$ spatial-angular danger grid and Pitch Depth $\times$ Angle Corridor Matrix across 8 tactical game states (Counter-Attacks, Under Pressure, Unpressed, Carries/Dribbles, Passes, Progressive Plays, and Defensive Ball-Wins).
+
+---
+
+## 4. Run Locally
+
+    pip install -r requirements.txt
+    uvicorn main:app --reload
+
+Open `http://127.0.0.1:8000` in your browser.
