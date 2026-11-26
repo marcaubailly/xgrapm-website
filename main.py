@@ -1,17 +1,36 @@
 import os, math, unicodedata, joblib
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="xGRAPM Football Analytics — 2015/16 Big 5 Leagues")
-model_data = joblib.load("xgrapm_inference.joblib")
-ratings = model_data.get("player_ratings", {})
-context = model_data.get("context_weights", {})
-top_actions = model_data.get("player_top_actions", {})
-threat_grid = model_data.get("threat_grid", [])
-tactical_zones = model_data.get("tactical_zones", [])
-threat_grid_contexts = model_data.get("threat_grid_contexts", {"all": threat_grid})
-tactical_zones_contexts = model_data.get("tactical_zones_contexts", {"all": tactical_zones})
+
+# Load v2 trained models + ratings, and fallback to v1 for spatial grids / top actions
+v2_path = "models/xgrapm_inference_v2.joblib" if os.path.exists("models/xgrapm_inference_v2.joblib") else "xgrapm_inference_v2.joblib"
+v2_data = joblib.load(v2_path)
+v1_data = joblib.load("xgrapm_inference.joblib") if os.path.exists("xgrapm_inference.joblib") else {}
+
+ratings = v2_data.get("player_ratings") or v1_data.get("player_ratings", {})
+match_outcome_clf = v2_data.get("match_outcome_clf")
+hgb_for = v2_data.get("hgb_for_model")
+hgb_against = v2_data.get("hgb_against_model")
+pass_clf = v2_data.get("pass_clf_pipeline")
+hgb_features = v2_data.get("hgb_features", [])
+pass_features = v2_data.get("pass_features", [])
+
+context = v1_data.get("context_weights", {
+    "home_advantage_coef": 0.24,
+    "is_leading_coef": -0.18,
+    "is_trailing_coef": 0.16,
+    "manpower_coef": 0.65,
+})
+top_actions = v1_data.get("player_top_actions", {})
+threat_grid = v1_data.get("threat_grid", [])
+tactical_zones = v1_data.get("tactical_zones", [])
+threat_grid_contexts = v1_data.get("threat_grid_contexts", {"all": threat_grid})
+tactical_zones_contexts = v1_data.get("tactical_zones_contexts", {"all": tactical_zones})
 
 def num(val, default=0.0):
     try:
@@ -238,23 +257,6 @@ class ContextSimRequest(BaseModel):
     minute: int = 0
     manpower_diff: int = 0
 
-def poisson_match_wdl(lam_h: float, lam_a: float, goals_h: int = 0, goals_a: int = 0, max_g: int = 9):
-    pmf_h = [math.exp(-lam_h) * (lam_h ** k) / math.factorial(k) for k in range(max_g + 1)]
-    pmf_a = [math.exp(-lam_a) * (lam_a ** k) / math.factorial(k) for k in range(max_g + 1)]
-    wp = dp = lp = 0.0
-    for i in range(max_g + 1):
-        for j in range(max_g + 1):
-            p = pmf_h[i] * pmf_a[j]
-            fh, fa = goals_h + i, goals_a + j
-            if fh > fa:
-                wp += p
-            elif fh == fa:
-                dp += p
-            else:
-                lp += p
-    tot = max(wp + dp + lp, 1e-9)
-    return round(wp / tot * 100, 1), round(dp / tot * 100, 1), round(lp / tot * 100, 1)
-
 def eval_context_scenario(team_gap: float, is_home: bool, score_diff: int, minute: int, manpower_diff: int):
     home_coef = num(context.get("home_advantage_coef"))
     lead_coef = num(context.get("is_leading_coef"))
@@ -263,11 +265,9 @@ def eval_context_scenario(team_gap: float, is_home: bool, score_diff: int, minut
 
     venue_adj = home_coef if is_home else 0.0
     if score_diff > 0:
-        scale = 1.0 if score_diff == 1 else 1.35
-        state_adj = lead_coef * scale
+        state_adj = lead_coef * (1.0 if score_diff == 1 else 1.35)
     elif score_diff < 0:
-        scale = 1.0 if score_diff == -1 else 1.35
-        state_adj = trail_coef * scale
+        state_adj = trail_coef * (1.0 if score_diff == -1 else 1.35)
     else:
         state_adj = 0.0
 
@@ -278,9 +278,24 @@ def eval_context_scenario(team_gap: float, is_home: bool, score_diff: int, minut
     lam_h = max(0.08, (1.35 + 0.5 * net_rate) * rem_frac)
     lam_a = max(0.08, (1.35 - 0.5 * net_rate) * rem_frac)
 
-    gh = max(0, score_diff)
-    ga = max(0, -score_diff)
-    wp, dp, lp = poisson_match_wdl(lam_h, lam_a, gh, ga)
+    # Use trained Stage 3 match_outcome_clf when available (minute == 0 & score_diff == 0)
+    if match_outcome_clf is not None and score_diff == 0 and minute == 0:
+        probs = match_outcome_clf.predict_proba(np.array([[net_rate]]))[0]
+        lp, dp, wp = round(float(probs[0]) * 100, 1), round(float(probs[1]) * 100, 1), round(float(probs[2]) * 100, 1)
+    else:
+        max_g = 9
+        pmf_h = [math.exp(-lam_h) * (lam_h ** k) / math.factorial(k) for k in range(max_g + 1)]
+        pmf_a = [math.exp(-lam_a) * (lam_a ** k) / math.factorial(k) for k in range(max_g + 1)]
+        wp = dp = lp = 0.0
+        gh, ga = max(0, score_diff), max(0, -score_diff)
+        for i in range(max_g + 1):
+            for j in range(max_g + 1):
+                p = pmf_h[i] * pmf_a[j]
+                if gh + i > ga + j: wp += p
+                elif gh + i == ga + j: dp += p
+                else: lp += p
+        tot = max(wp + dp + lp, 1e-9)
+        wp, dp, lp = round(wp / tot * 100, 1), round(dp / tot * 100, 1), round(lp / tot * 100, 1)
 
     return {
         "venue_adj": round(venue_adj, 4),
@@ -306,6 +321,49 @@ def simulate_context(req: ContextSimRequest):
     ]
     raw_weights = {k: round(num(v), 4) for k, v in context.items()}
     return {"weights": raw_weights, "current": current, "benchmarks": benchmarks}
+
+class ActionSimRequest(BaseModel):
+    start_x: float = 75.0
+    start_y: float = 40.0
+    end_x: float = 108.0
+    end_y: float = 42.0
+    total_carry_dist: float = 8.0
+    under_pressure: int = 0
+    dribbles_attempted: int = 0
+    dribbles_completed: int = 0
+    is_defensive_intervention: int = 0
+
+@app.post("/api/simulate-action")
+def simulate_action(req: ActionSimRequest):
+    if hgb_for is None or pass_clf is None:
+        raise HTTPException(status_code=503, detail="Stage 1 inference models not loaded")
+    row = pd.DataFrame([{
+        "start_x": req.start_x,
+        "start_y": req.start_y,
+        "end_x": req.end_x,
+        "end_y": req.end_y,
+        "dist_to_goal_start": float(np.hypot(120.0 - req.start_x, 40.0 - req.start_y)),
+        "dist_to_goal_end": float(np.hypot(120.0 - req.end_x, 40.0 - req.end_y)),
+        "angle_to_goal_start": float(np.arctan2(40.0 - req.start_y, 120.0 - req.start_x)),
+        "angle_to_goal_end": float(np.arctan2(40.0 - req.end_y, 120.0 - req.end_x)),
+        "is_defensive_intervention": req.is_defensive_intervention,
+        "under_pressure": req.under_pressure,
+        "dribbles_attempted": req.dribbles_attempted,
+        "dribbles_completed": req.dribbles_completed,
+        "total_carry_dist": req.total_carry_dist,
+        "is_progressive": int((req.end_x - req.start_x) >= 10.0),
+        "is_zone_14": int(85.0 <= req.end_x <= 102.0 and 26.0 <= req.end_y <= 54.0),
+        "is_box_entry": int(req.end_x >= 102.0 and 18.0 <= req.end_y <= 62.0),
+    }])
+    xg_for = float(hgb_for.predict(row[hgb_features])[0])
+    xg_against = float(hgb_against.predict(row[hgb_features])[0])
+    pass_prob = float(pass_clf.predict_proba(row[pass_features])[0, 1])
+    return {
+        "pass_completion_prob": round(pass_prob * 100, 1),
+        "expected_npxg_for": round(xg_for, 4),
+        "expected_npxg_against": round(xg_against, 4),
+        "net_action_value": round(xg_for - xg_against, 4),
+    }
 
 @app.get("/api/tactics")
 def get_tactics():
