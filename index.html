@@ -62,9 +62,9 @@
             </div>
             <nav class="flex flex-wrap gap-4 text-xs sm:text-sm font-semibold text-slate-400">
                 <button onclick="switchTab('scouting')" id="btn-scouting" class="tab-btn text-blue-400 border-b-2 border-blue-400 pb-1">1. Scouting & Plays</button>
-                <button onclick="switchTab('pitch')" id="btn-pitch" class="tab-btn pb-1 hover:text-blue-300">2. Match Context Lab</button>
-                <button onclick="switchTab('transfer')" id="btn-transfer" class="tab-btn pb-1 hover:text-blue-300">3. Ballon d'Or vs. xGRAPM</button>
-                <button onclick="switchTab('tactics')" id="btn-tactics" class="tab-btn pb-1 hover:text-blue-300">4. Threat Heatmap</button>
+                
+                
+                
             </nav>
         </div>
     </header>
@@ -118,12 +118,12 @@
                                 <tr>
                                     <th class="p-2">#</th>
                                     <th class="p-2">Player (Mins)</th>
-                                    <th class="p-2 text-purple-300" title="Percentile vs. players in the same role">Role %ile</th>
-                                    <th class="p-2 text-blue-400" title="In-possession threat added (passes, carries, dribbles, shots)">Off</th>
-                                    <th class="p-2 text-cyan-300" title="Out-of-possession defensive stops (tackles, interceptions, recoveries)">Def</th>
-                                    <th class="p-2 text-amber-400" title="Off-ball & structural team impact per 90">Macro</th>
-                                    <th class="p-2 text-emerald-400">Total /90</th>
-                                    <th class="p-2 text-sky-300" title="Net npxG generated per 100 on-ball involvements">npxG /100</th>
+                                    <th class="p-2 text-purple-300" title="Percentile vs. players in the same role" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='role_pct'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">Role %ile</th>
+                                    <th class="p-2 text-blue-400" title="In-possession threat added (passes, carries, dribbles, shots)" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='micro_off'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">Off</th>
+                                    <th class="p-2 text-cyan-300" title="Out-of-possession defensive stops (tackles, interceptions, recoveries)" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='micro_def'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">Def</th>
+                                    <th class="p-2 text-amber-400" title="Off-ball & structural team impact per 90" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='macro'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">Macro</th>
+                                    <th class="p-2 text-emerald-400" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='total'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">Total /90</th>
+                                    <th class="p-2 text-sky-300" title="Net npxG generated per 100 on-ball involvements" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='efficiency'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">npxG /100</th>
                                 </tr>
                             </thead>
                             <tbody id="leaderboard-body" class="divide-y divide-slate-700/70"></tbody>
@@ -343,9 +343,9 @@
                             <tr>
                                 <th class="p-2">Ballon d'Or</th>
                                 <th class="p-2">Player (Club)</th>
-                                <th class="p-2 text-purple-300">Role %ile</th>
+                                <th class="p-2 text-purple-300" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='role_pct'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">Role %ile</th>
                                 <th class="p-2 text-white">15/16 Total</th>
-                                <th class="p-2 text-sky-300">npxG /100</th>
+                                <th class="p-2 text-sky-300" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='efficiency'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">npxG /100</th>
                                 <th class="p-2 text-blue-400">Shortlist Rank</th>
                                 <th class="p-2">Δ Rank</th>
                             </tr>
@@ -373,7 +373,7 @@
                         <p class="text-[11px] text-slate-400 mb-2">Highest single-season net npxG/90 impact not nominated for Ballon d'Or</p>
                         <table class="w-full text-xs text-left">
                             <thead class="text-slate-400 uppercase bg-slate-900">
-                                <tr><th class="p-2">Big 5 Rank</th><th class="p-2">Player</th><th class="p-2">Pos</th><th class="p-2 text-sky-300">npxG /100</th><th class="p-2 text-white">15/16 Total</th></tr>
+                                <tr><th class="p-2">Big 5 Rank</th><th class="p-2">Player</th><th class="p-2">Pos</th><th class="p-2 text-sky-300" onclick="const el=document.getElementById('sort-filter'); if(el){el.value='efficiency'; el.dispatchEvent(new Event('change'));}" style="cursor:pointer;" title="Click to sort by this column">npxG /100</th><th class="p-2 text-white">15/16 Total</th></tr>
                             </thead>
                             <tbody id="bd-snubs-body" class="divide-y divide-slate-700/70"></tbody>
                         </table>
